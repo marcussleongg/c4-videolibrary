@@ -1,6 +1,6 @@
 """Provider factory — reads config to decide which provider handles each task.
 
-Hotswapping: change SCENE_MODEL / TRANSCRIPTION_MODEL / PROSODY_MODEL in .env
+Hotswapping: change SCENE_MODEL / TRANSCRIPTION_MODEL / PROSODY_MODEL in config
 to use different models. If all three point to the same model (default),
 the pipeline can use GeminiVideoAnalyzer.analyze() for a single API call.
 If any differ, the pipeline calls each provider independently.
@@ -18,7 +18,13 @@ from src.providers.base import (
     TranscriptResult,
     TranscriptionProvider,
 )
+from src.providers.embedding import OpenAIEmbedder
 from src.providers.video_analyzer import GeminiVideoAnalyzer
+
+
+def get_embedding_provider() -> EmbeddingProvider:
+    """Return the configured EmbeddingProvider."""
+    return OpenAIEmbedder()
 
 
 def get_scene_describer() -> SceneDescriber:

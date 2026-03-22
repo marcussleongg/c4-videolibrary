@@ -96,3 +96,28 @@ Return ONLY a single JSON object — no markdown fences, no text before or after
 
 If no speech is present, use: {"max_volume": "quiet", "emotional_tones": []}
 """
+
+# Reranker prompt — Claude Sonnet re-scores retrieval candidates.
+# Uses .format() with: query, n, candidates.
+RERANK_PROMPT = """\
+You are judging how relevant each video segment is to a user's search query.
+
+Query: {query}
+
+Below are {n} candidate segments from body-worn camera footage. For each one, \
+score its relevance to the query on a scale of 0 to 10:
+- 10: directly answers the query
+- 7-9: highly relevant, contains key elements
+- 4-6: partially relevant
+- 1-3: tangentially related
+- 0: not relevant at all
+
+{candidates}
+
+Return ONLY a JSON array of objects, one per segment, ordered by relevance \
+(most relevant first). No markdown fences, no other text.
+
+[
+  {{"id": <segment ID string>, "score": <integer 0-10>, "reason": <one-sentence explanation>}},
+  ...
+]"""
