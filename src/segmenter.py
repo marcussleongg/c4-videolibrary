@@ -80,8 +80,8 @@ def split_video(
             "file_name": video_path.name,
             "segment_path": str(segment_path),
             "segment_index": i,
-            "start_s": round(start),
-            "end_s": round(end),
+            "start_s": start,
+            "end_s": end,
         })
 
     return results

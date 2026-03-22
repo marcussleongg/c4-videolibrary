@@ -7,7 +7,7 @@ from typing import Protocol, runtime_checkable
 @dataclass
 class SceneDescription:
     scene_description: str
-    time_of_day: str  # "day" / "night" / "dusk" / "dawn"
+    time_of_day: str  # "day" / "night" / "twilight"
     events: list[str] = field(default_factory=list)
 
 
@@ -18,10 +18,8 @@ class TranscriptResult:
 
 @dataclass
 class ProsodyResult:
-    has_shouting: bool
     max_volume: str  # "quiet" / "normal" / "loud" / "shouting"
     emotional_tones: list[str] = field(default_factory=list)
-    background_sounds: list[str] = field(default_factory=list)
 
 
 @dataclass

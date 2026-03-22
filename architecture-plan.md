@@ -25,7 +25,7 @@ The system must support **temporal reasoning** — understanding events, actions
 | **Scene Description** | Gemini Flash (video input) | Accepts native video. Captures temporal events, actions, people, objects. Also notes visible text/signs/plates as part of description | Combined call: ~$10-15 for 6K segments |
 | **Transcription** | Gemini Flash (video input) | Native audio support, 3.1% WER. Swappable: Whisper via Groq | (included in combined call) |
 | **Prosody Analysis** | Gemini Flash (video input) | Native audio support for tone/volume detection. Swappable: dedicated audio models | (included in combined call) |
-| **Text Embeddings** | OpenAI text-embedding-3-small | Standard, cheap, good quality | ~$0.50 |
+| **Text Embeddings** | OpenAI text-embedding-3-large | Higher retrieval quality for semantic queries, trivial cost difference at this scale | ~$1-2 |
 | **Reranking** | Claude Sonnet 4 | Strong reasoning to judge relevance of candidates | ~$0.02-0.05/query |
 
 **Hybrid approach**: Scene description, transcription, and prosody each have their own Protocol interface, making them independently swappable. The default `GeminiVideoAnalyzer` combines all three into a **single Gemini Flash call per segment** (fast path — cheaper, fewer API calls). But if evaluation shows a specialized model is better for one task (e.g., Whisper for transcription), we can swap just that provider — the pipeline will make separate calls only for the swapped component.
@@ -162,28 +162,28 @@ Video File (30min-2hrs)
 **Supabase Postgres** (primary store — handles most queries):
 ```sql
 CREATE TABLE segments (
-  id              TEXT PRIMARY KEY,    -- "traffic_stop_seg_47"
+  id              TEXT PRIMARY KEY,    -- "traffic_stop_seg_047"
   file_name       TEXT NOT NULL,       -- "traffic_stop.mp4" (joined with VIDEO_DIR config at query time)
-  start_s         INTEGER NOT NULL,    -- 1390
-  end_s           INTEGER NOT NULL,    -- 1435
+  start_s         REAL NOT NULL,       -- 1390.0
+  end_s           REAL NOT NULL,       -- 1410.0
   scene_description TEXT,              -- rich temporal description from VLM (includes visible text/signs/plates)
   transcript      TEXT,                -- verbatim speech with timestamps
-  prosody_json    JSONB,               -- { has_shouting, max_volume, tones, sounds }
-  time_of_day     TEXT,                -- "day" / "night" / "dusk" / "dawn"
-  has_shouting    BOOLEAN,             -- derived from prosody for fast filtering
+  prosody_json    JSONB,               -- { max_volume, emotional_tones }
+  time_of_day     TEXT,                -- "day" / "night" / "twilight"
+  max_volume      TEXT,                -- "quiet" / "normal" / "loud" / "shouting" (denormalized for fast filtering)
   -- FTS index:
   search_vector   TSVECTOR             -- auto-generated from scene_desc + transcript
 );
 
 CREATE INDEX idx_segments_fts ON segments USING GIN(search_vector);
 CREATE INDEX idx_segments_time ON segments(time_of_day);
-CREATE INDEX idx_segments_shouting ON segments(has_shouting);
+CREATE INDEX idx_segments_volume ON segments(max_volume);
 CREATE INDEX idx_segments_file ON segments(file_name);
 ```
 
 Supabase handles:
 - **Full-text search** (FTS) on transcript, scene_description
-- **Metadata filtering** (time_of_day, has_shouting, file_name)
+- **Metadata filtering** (time_of_day, max_volume, file_name)
 - **Combined queries** ("license plates at night" = FTS on scene_description + filter time_of_day)
 - **All structured data** — timestamps, file names, prosody JSON
 - **Fast for exact/keyword queries** — < 10ms on 6K rows
@@ -191,13 +191,13 @@ Supabase handles:
 **Pinecone** (vector search — only for semantic/abstract queries):
 ```
 {
-  id: "traffic_stop_seg_47",
+  id: "traffic_stop_seg_047",
   vector: [0.023, -0.118, ...],   // embedding of concatenated text
   metadata: {
     file_name: "traffic_stop.mp4",
-    start_s: 1390,
-    end_s: 1435,
-    has_shouting: false,
+    start_s: 1390.0,
+    end_s: 1410.0,
+    max_volume: "normal",
     time_of_day: "night"
   }
 }
