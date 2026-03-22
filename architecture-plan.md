@@ -1,17 +1,20 @@
 # Video Library Search System — Architecture Plan
 
 ## Context
-Build a fully cloud-native system to make ~38 body-worn camera videos (30min–2hrs each) searchable via natural language. No local model inference — all processing, storage, and serving runs in the cloud. All model inference via OpenRouter. Deliverable: Python + Jupyter notebooks.
+Build a system to make ~38 body-worn camera videos (30min–2hrs each) searchable via natural language. All model inference via OpenRouter (no local model inference). Video files stay local; only text/embeddings are stored in the cloud. Deliverable: Python + Jupyter notebooks.
+
+The system must support **temporal reasoning** — understanding events, actions, and transitions across time, not just static frame-level properties (retrieval of "the moment the person in the red jacket started shouting" not just "frames containing a red jacket").
 
 ---
 
 ## Core Decisions
 
-1. **Separate specialized cloud APIs + unified retrieval layer** — no unified model handles all modalities well enough
-2. **Text-mediated visual search** — VLM generates rich scene descriptions, embed as text vectors. No CLIP needed.
-3. **Hotswappable components** — each processing step is behind a Protocol interface, easily replaceable
-4. **Mixed model strategy via OpenRouter** — use the best model for each task, not one model for everything
-5. **OCR as a separate swappable function** — can plug in Google Cloud Vision, Roboflow, or YOLO later
+1. **Single VLM for ingestion, specialized models for retrieval** — one Gemini Flash call per segment handles scene description, transcription, and prosody. Different models handle embeddings and reranking.
+2. **Video clips sent directly to VLM** — Gemini Flash accepts native video input, enabling temporal understanding of actions and events (not just keyframe descriptions)
+3. **Text-mediated visual search** — VLM generates rich scene/event descriptions from video, embed as text vectors
+4. **Always-on dual retrieval: FTS + vector search** — every query runs both Supabase FTS (keyword matching) and Pinecone vector search (semantic similarity) in parallel. Results fused with Reciprocal Rank Fusion (RRF). No query routing needed — RRF naturally lets the right signal dominate.
+5. **Granular hotswappable components** — separate Protocol interfaces for scene description, transcription, and prosody. Default implementation combines all three in one Gemini call (fast path), but each can be independently swapped to a specialized provider
+6. **No separate OCR pass** — the VLM scene description notes visible text/signs/plates as part of its output. Dedicated per-frame OCR is unnecessary since we only need to locate footage containing text, not read it precisely
 
 ---
 
@@ -19,15 +22,13 @@ Build a fully cloud-native system to make ~38 body-worn camera videos (30min–2
 
 | Task | Model | Why this model? | Cost |
 |------|-------|----------------|------|
-| **Transcription** | Gemini Flash | 3.1% WER (better than Whisper 10.3%). One of few models accepting audio input | ~$6 for 50hrs |
-| **Scene Description** | Gemini Flash | Bulk task (~6K segments). Cheap + good enough for descriptions | ~$5-10 |
-| **OCR** | Claude Sonnet 4 | More precise on small text, license plates, partially obscured characters than Flash | ~$5-8 |
-| **Audio Prosody** | Gemini Flash | Requires audio input. Gemini is one of the only models on OpenRouter with native audio support | ~$3-5 |
-| **Text Embeddings** | OpenAI text-embedding-3-small | Standard, cheap, good quality. Via OpenRouter or direct | ~$0.50 |
-| **Query Routing** | Claude Haiku / GPT-4o-mini | Fast + cheap. Routing is simple classification, doesn't need a large model | ~$0.001/query |
-| **Reranking** | Claude Sonnet 4 | Needs strong reasoning to judge relevance of candidates | ~$0.02-0.05/query |
+| **Scene Description** | Gemini Flash (video input) | Accepts native video. Captures temporal events, actions, people, objects. Also notes visible text/signs/plates as part of description | Combined call: ~$10-15 for 6K segments |
+| **Transcription** | Gemini Flash (video input) | Native audio support, 3.1% WER. Swappable: Whisper via Groq | (included in combined call) |
+| **Prosody Analysis** | Gemini Flash (video input) | Native audio support for tone/volume detection. Swappable: dedicated audio models | (included in combined call) |
+| **Text Embeddings** | OpenAI text-embedding-3-small | Standard, cheap, good quality | ~$0.50 |
+| **Reranking** | Claude Sonnet 4 | Strong reasoning to judge relevance of candidates | ~$0.02-0.05/query |
 
-**Rationale for mixing**: Gemini Flash excels at bulk multimodal processing (cheap, accepts audio). Claude Sonnet excels at precision tasks (OCR accuracy, reasoning for reranking). Using the right model per task gives better quality per dollar than one model everywhere.
+**Hybrid approach**: Scene description, transcription, and prosody each have their own Protocol interface, making them independently swappable. The default `GeminiVideoAnalyzer` combines all three into a **single Gemini Flash call per segment** (fast path — cheaper, fewer API calls). But if evaluation shows a specialized model is better for one task (e.g., Whisper for transcription), we can swap just that provider — the pipeline will make separate calls only for the swapped component.
 
 ---
 
@@ -36,9 +37,8 @@ Build a fully cloud-native system to make ~38 body-worn camera videos (30min–2
 | Concern | Service | Why | Free Tier? |
 |---------|---------|-----|------------|
 | **Model Inference** | OpenRouter | Single API key, access to all models | Pay-per-use |
-| **Video Storage** | Cloudflare R2 | No egress fees, S3-compatible | 10GB free |
-| **Vector Database** | Pinecone serverless | Managed, metadata filtering | 2GB free |
-| **SQL Database** | Supabase Postgres (FTS) | Structured data + full-text search | 500MB free |
+| **Vector Database** | Pinecone serverless | Semantic similarity search for abstract queries | 2GB free |
+| **SQL Database** | Supabase Postgres (FTS) | Structured data, full-text search, metadata filtering. Handles most queries without vector search. | 500MB free |
 
 ---
 
@@ -47,180 +47,260 @@ Build a fully cloud-native system to make ~38 body-worn camera videos (30min–2
 ### Hotswappable Provider Design
 
 ```python
-class OCRProvider(Protocol):
-    def extract_text(self, image_bytes: bytes) -> OCRResult: ...
+# --- Granular Protocols (each independently swappable) ---
+
+class SceneDescriber(Protocol):
+    def describe(self, video_bytes: bytes) -> SceneDescription: ...
+    # Returns: scene_description, time_of_day, events list
 
 class TranscriptionProvider(Protocol):
     def transcribe(self, audio_bytes: bytes) -> TranscriptResult: ...
+    # Returns: timestamped transcript text
 
-class SceneDescriber(Protocol):
-    def describe(self, frames: list[bytes]) -> SceneDescription: ...
-
-class AudioAnalyzer(Protocol):
-    def analyze(self, audio_bytes: bytes) -> ProsodyResult: ...
+class ProsodyAnalyzer(Protocol):
+    def analyze_prosody(self, audio_bytes: bytes) -> ProsodyResult: ...
+    # Returns: has_shouting, max_volume, emotional_tones, background_sounds
 
 class EmbeddingProvider(Protocol):
     def embed(self, text: str) -> list[float]: ...
 
+# --- Default Fast-Path Implementation ---
+
+class GeminiVideoAnalyzer:
+    """Implements SceneDescriber + TranscriptionProvider + ProsodyAnalyzer
+    in a SINGLE Gemini Flash call. One API call returns all three outputs.
+
+    If any individual provider is overridden in config, the pipeline
+    calls Gemini for the remaining tasks and the specialized provider
+    for the swapped task. E.g., if TranscriptionProvider is swapped to
+    WhisperTranscriber, the pipeline makes:
+      - 1 Gemini call (scene + prosody only)
+      - 1 Whisper call (transcription only)
+    """
+    def describe(self, video_bytes): ...
+    def transcribe(self, audio_bytes): ...
+    def analyze_prosody(self, audio_bytes): ...
+
 # All providers instantiated via config — swap by changing config, not code
+```
+
+### What Each Component Sees
+
+```
+Segment (10-60s of body-cam footage)
+  │
+  └─→ VIDEO CLIP (.mp4 with audio)
+        Sent to: Gemini Flash (native video input)
+        VLM sees: motion, temporal events, audio, visual scene
+        VLM can describe: "officer handcuffs suspect" (action over time)
+                           "driver exits vehicle" (temporal event)
+                           "voice escalates at 0:18" (audio-visual correlation)
+                           "license plate visible on silver sedan" (text presence)
 ```
 
 ### Ingestion Pipeline
 
 ```
-Video File → Upload to Cloudflare R2
+Video File (30min-2hrs)
   │
-  ├─→ [ffmpeg locally] — not model inference, just file splitting
-  │     Adaptive scene-change segmentation (PySceneDetect)
-  │     Min 10s, max 60s per segment
-  │     Extract audio (.wav) + keyframes (1 per 5s) per segment
-  │     Upload extracted files to R2
+  ├─→ [ffmpeg locally] — fixed-length splitting, no model inference
+  │     20s segments with 5s overlap (each segment advances 15s)
+  │     Overlap gives VLM context at boundaries to avoid mid-sentence cuts
+  │     Produces per segment:
+  │       - {filename}_seg_NNN.mp4 (video clip with audio, stored on external drive)
   │
   ├─→ Per segment (all via OpenRouter, parallelized):
   │     │
-  │     ├─→ [TranscriptionProvider → Gemini Flash]
-  │     │     Audio → timestamped transcript (3.1% WER)
+  │     ├─→ [SceneDescriber + TranscriptionProvider + ProsodyAnalyzer]
   │     │
-  │     ├─→ [SceneDescriber → Gemini Flash]
-  │     │     Keyframes → detailed scene description
-  │     │     Prompt: people, objects, actions, clothing,
-  │     │     vehicles, environment, lighting, time of day
+  │     │     DEFAULT (fast path — GeminiVideoAnalyzer):
+  │     │       ONE Gemini Flash call with video clip + audio
+  │     │       Prompt: "Analyze this body-cam footage segment.
+  │     │         EVENTS: What happens, in temporal order, with timestamps
+  │     │         PEOPLE: Everyone visible — clothing colors/types, actions, position
+  │     │         VEHICLES: Type, color, make/model, notable features
+  │     │         OBJECTS: Everything visible, including small/background items
+  │     │         ENVIRONMENT: Indoor/outdoor, lighting, time of day, weather
+  │     │         AUDIO: Transcribe all speech verbatim with timestamps.
+  │     │                Note shouting, raised voices, tone changes.
+  │     │                Note background sounds (sirens, engines, radio).
+  │     │         Note any visible text, signs, or license plates."
   │     │
-  │     ├─→ [OCRProvider → Claude Sonnet]
-  │     │     Keyframes → extract all visible text, license plates, signs
-  │     │     Separate call with focused OCR prompt for precision
-  │     │     ★ Hotswappable: Google Cloud Vision, Roboflow, etc.
+  │     │     SWAPPED EXAMPLE (TranscriptionProvider → WhisperTranscriber):
+  │     │       Gemini Flash call (scene + prosody only, no transcription)
+  │     │       + Whisper call (audio → transcript)
+  │     │       = 2 calls instead of 1, but better transcription quality
   │     │
-  │     ├─→ [AudioAnalyzer → Gemini Flash]
-  │     │     Audio → prosody analysis
-  │     │     Returns: { has_shouting, max_intensity, tone, description }
+  │     │     Output (regardless of which providers are used): {
+  │     │       scene_description: "Officer approaches silver sedan...",
+  │     │       transcript: "[00:05] Driver: What did I do? [00:08] Officer: ...",
+  │     │       prosody: { has_shouting: false, max_volume: "normal",
+  │     │                  emotional_tones: ["calm", "nervous"],
+  │     │                  background_sounds: ["engine idling", "radio"] },
+  │     │       time_of_day: "night"
+  │     │     }
+  │     │
+  │     ├─→ [Timestamp Conversion]
+  │     │     VLM returns timestamps relative to the segment (e.g., [00:18])
+  │     │     Convert to absolute timestamps in the original video:
+  │     │       absolute_time = segment.start_s + relative_time
+  │     │     e.g., segment starts at 1390s → [00:18] becomes [23:28]
+  │     │     All timestamps in transcript and events are converted
+  │     │     before storing — everything in the database is absolute.
   │     │
   │     ├─→ [EmbeddingProvider → OpenAI]
-  │     │     Concatenate all text → single embedding vector
+  │     │     Concatenate: scene_description + transcript
+  │     │     → single text embedding vector
   │     │
-  │     └─→ [Store]
-  │           → Pinecone: embedding + metadata
-  │           → Supabase: full segment record + FTS indexes
+  │     └─→ [Store in both databases]
+  │           → Pinecone: embedding vector + metadata
+  │           → Supabase: full segment record with all text fields
 ```
 
-### Indexing Layer
+### Storage Layer — What Goes Where
 
-**Pinecone** (vector search):
-- One embedding per segment (all modalities merged into text → single vector)
-- Metadata: video_id, start_s, end_s, has_shouting, time_of_day
-- Supports metadata filtering + vector similarity in one query
+**Supabase Postgres** (primary store — handles most queries):
+```sql
+CREATE TABLE segments (
+  id              TEXT PRIMARY KEY,    -- "traffic_stop_seg_47"
+  file_name       TEXT NOT NULL,       -- "traffic_stop.mp4" (joined with VIDEO_DIR config at query time)
+  start_s         INTEGER NOT NULL,    -- 1390
+  end_s           INTEGER NOT NULL,    -- 1435
+  scene_description TEXT,              -- rich temporal description from VLM (includes visible text/signs/plates)
+  transcript      TEXT,                -- verbatim speech with timestamps
+  prosody_json    JSONB,               -- { has_shouting, max_volume, tones, sounds }
+  time_of_day     TEXT,                -- "day" / "night" / "dusk" / "dawn"
+  has_shouting    BOOLEAN,             -- derived from prosody for fast filtering
+  -- FTS index:
+  search_vector   TSVECTOR             -- auto-generated from scene_desc + transcript
+);
 
-**Supabase Postgres** (structured + full-text search):
-- `segments` table: all fields, full segment records
-- `tsvector` index on: transcript, scene_description, ocr_text, prosody_notes
-- Exact keyword search ("Miranda rights") + structured filters
+CREATE INDEX idx_segments_fts ON segments USING GIN(search_vector);
+CREATE INDEX idx_segments_time ON segments(time_of_day);
+CREATE INDEX idx_segments_shouting ON segments(has_shouting);
+CREATE INDEX idx_segments_file ON segments(file_name);
+```
+
+Supabase handles:
+- **Full-text search** (FTS) on transcript, scene_description
+- **Metadata filtering** (time_of_day, has_shouting, file_name)
+- **Combined queries** ("license plates at night" = FTS on scene_description + filter time_of_day)
+- **All structured data** — timestamps, file names, prosody JSON
+- **Fast for exact/keyword queries** — < 10ms on 6K rows
+
+**Pinecone** (vector search — only for semantic/abstract queries):
+```
+{
+  id: "traffic_stop_seg_47",
+  vector: [0.023, -0.118, ...],   // embedding of concatenated text
+  metadata: {
+    file_name: "traffic_stop.mp4",
+    start_s: 1390,
+    end_s: 1435,
+    has_shouting: false,
+    time_of_day: "night"
+  }
+}
+```
+
+Pinecone handles:
+- **Semantic similarity** for abstract queries ("tense confrontation", "someone looking nervous")
 
 ### Retrieval + Fusion
+
+No query routing — every query always runs both retrieval paths in parallel. RRF naturally lets the right signal dominate (FTS for keyword queries, vector for semantic queries).
 
 ```
 Natural Language Query
   │
-  ├─→ [Query Analyzer — Claude Haiku via OpenRouter]
-  │     Classify query → determine retrieval strategy
-  │     Output: { vector_query, text_query, metadata_filters,
-  │               modalities: ["visual","audio","text","metadata"] }
-  │
-  ├─→ [Parallel Retrieval]
-  │     ├─→ Pinecone: embed query → semantic similarity
-  │     ├─→ Supabase FTS: keyword/phrase match
-  │     └─→ Supabase SQL: metadata filters (has_shouting, time_of_day)
+  ├─→ [Parallel Retrieval — always both paths]
+  │     │
+  │     ├─→ Supabase FTS: keyword/phrase match on search_vector
+  │     │     Fast (< 10ms). Catches exact matches.
+  │     │     "Miranda rights" → finds segments where transcript contains those words
+  │     │
+  │     ├─→ Supabase SQL: metadata filters (extracted from query)
+  │     │     time_of_day = 'night', has_shouting = true, etc.
+  │     │
+  │     └─→ Pinecone: embed query → semantic similarity
+  │           Slower (~100ms) but catches semantic matches.
+  │           "tense confrontation" → finds "driver exits aggressively, officer steps back"
   │
   └─→ [Fusion + Reranking]
-        ├─→ Reciprocal Rank Fusion: score = Σ(1/(k+rank_i))
-        └─→ Top-K → Claude Sonnet reranker (strong reasoning for relevance)
-        └─→ Return: [(video_id, start_s, end_s, score, evidence)]
+        ├─→ Reciprocal Rank Fusion: score = Σ(1/(k+rank_i)) across all result sets
+        │     FTS results dominate for keyword queries (precise matches score high)
+        │     Vector results dominate for abstract queries (FTS returns nothing)
+        │     Metadata filters applied as hard constraints (not scored)
+        ├─→ Top-K → Claude Sonnet reranker
+        │     Sends scene_description + transcript of top candidates
+        │     LLM re-scores relevance to original query
+        └─→ Return: [(video_id, start_s, end_s, score, evidence_text)]
 ```
-
----
-
-## Query → Retrieval Path Mapping
-
-| Query | Strategy | How |
-|-------|----------|-----|
-| "Vehicle pulled over at night" | Vector + metadata | Semantic search on scene desc + time_of_day filter |
-| "Someone raises their voice" | Metadata + vector | Filter has_shouting=true + semantic on prosody notes |
-| "Person in a red shirt" | Vector | Semantic search — scene descriptions mention clothing |
-| "Officer reads Miranda rights" | FTS | Postgres full-text "Miranda" on transcript |
-| "License plates visible" | FTS + vector | FTS on ocr_text + semantic on scene_desc |
-| "Suspect being handcuffed" | Vector | Semantic search — scene desc covers actions |
-
----
-
-## Cost Estimate (all 38 videos, ~50hrs footage)
-
-| Component | Cost |
-|-----------|------|
-| Gemini Flash — transcription (~50hrs audio) | ~$6 |
-| Gemini Flash — scene descriptions (~6K segments) | ~$5-10 |
-| Claude Sonnet — OCR pass (~6K segments) | ~$5-8 |
-| Gemini Flash — audio prosody (~6K segments) | ~$3-5 |
-| OpenAI — text embeddings (~6K segments) | ~$0.50 |
-| Pinecone serverless (free tier) | $0 |
-| Supabase Postgres (free tier) | $0 |
-| Cloudflare R2 (10GB free) | $0 |
-| **Total indexing** | **~$22-32** |
-| Per-query cost (routing + reranking) | ~$0.02-0.05 |
 
 ---
 
 ## Project Structure
 
 ```
-video-search/
+c4-videolibrary/
 ├── notebooks/
-│   ├── 01_segment.ipynb       # ffmpeg + PySceneDetect: split, extract, upload
-│   ├── 02_ingest.ipynb        # OpenRouter APIs: transcribe, describe, OCR, analyze
-│   ├── 03_index.ipynb         # Push to Pinecone + Supabase
-│   └── 04_search.ipynb        # Interactive query interface + demo
+│   └── 00_evaluate_models.ipynb  # Model comparison tests
 ├── src/
-│   ├── providers/             # Hotswappable provider interfaces
-│   │   ├── base.py            # Protocol classes: OCRProvider, TranscriptionProvider, etc.
-│   │   ├── transcription.py   # GeminiTranscriber (default). Swappable: Whisper, Deepgram
-│   │   ├── scene.py           # GeminiSceneDescriber (default)
-│   │   ├── ocr.py             # ClaudeOCR (default). Swappable: Google Vision, Roboflow
-│   │   ├── audio.py           # GeminiAudioAnalyzer (default). Swappable: Hume AI
-│   │   └── embedding.py       # OpenAIEmbedder (default). Swappable: Voyage, Cohere
-│   ├── segmenter.py           # PySceneDetect + ffmpeg
-│   ├── storage.py             # R2 upload/download client
-│   ├── vector_store.py        # Pinecone client
-│   ├── sql_store.py           # Supabase Postgres client
-│   ├── query_analyzer.py      # Claude Haiku: classify query → retrieval plan
-│   ├── retriever.py           # Multi-index retrieval + RRF
-│   ├── reranker.py            # Claude Sonnet: rerank top-K
-│   └── config.py              # Model IDs, API keys (env vars), thresholds
+│   ├── __init__.py
+│   ├── config.py                 # Model IDs, API keys (env vars), paths, thresholds
+│   ├── segmenter.py              # ffmpeg: fixed-length splitting with overlap
+│   ├── providers/                # Hotswappable provider interfaces
+│   │   ├── __init__.py
+│   │   ├── base.py               # Protocol classes: SceneDescriber, TranscriptionProvider, etc.
+│   │   ├── video_analyzer.py     # GeminiVideoAnalyzer: combined fast-path (scene+transcript+prosody)
+│   │   ├── transcription.py      # Swap-in alternatives (e.g., WhisperTranscriber)
+│   │   ├── prosody.py            # Swap-in alternatives (dedicated prosody analyzers)
+│   │   └── embedding.py          # OpenAIEmbedder (default). Swappable: Voyage, Cohere
+│   ├── ingestion.py              # Orchestrates: segment → analyze → embed → store
+│   ├── vector_store.py           # Pinecone client
+│   ├── sql_store.py              # Supabase Postgres client (FTS + metadata)
+│   ├── retriever.py              # Always-on dual retrieval (FTS + vector) + RRF fusion
+│   ├── reranker.py               # Claude Sonnet: rerank top-K
+│   └── cli.py                    # CLI entry point (segment, ingest, search commands)
 ├── data/
-│   └── segments/              # Local cache (gitignored)
+│   └── segments/                 # Local segment cache (gitignored)
 ├── requirements.txt
-└── .env                       # OPENROUTER_API_KEY, PINECONE_API_KEY, etc. (gitignored)
+└── .env                          # OPENROUTER_API_KEY, PINECONE_API_KEY, SUPABASE keys (gitignored)
 ```
 
 ---
 
-## Implementation Order
+## Implementation Phases
 
-1. **Setup**: Project scaffold, env vars, provider Protocol interfaces
-2. **Segmentation**: ffmpeg + PySceneDetect → split videos, extract audio + keyframes
-3. **Upload**: Push segments to Cloudflare R2
-4. **Transcription**: Gemini Flash via OpenRouter → timestamped transcripts
-5. **Scene descriptions**: Gemini Flash via OpenRouter → rich text descriptions
-6. **OCR**: Claude Sonnet via OpenRouter → text/plate extraction (hotswappable)
-7. **Audio prosody**: Gemini Flash via OpenRouter → shouting detection, tone
-8. **Embeddings**: OpenAI → all text → vectors
-9. **Indexing**: Push to Pinecone (vectors) + Supabase (FTS + metadata)
-10. **Query pipeline**: Haiku analyzer → parallel retrieval → RRF → Sonnet reranker
-11. **Notebook demo**: All 6 example queries with evidence display
+### Phase 1 — Foundation (no API keys needed)
+1. Project scaffold: `src/` package, config, requirements
+2. Provider Protocol interfaces (`base.py`)
+3. Segmenter (`segmenter.py`): ffmpeg fixed-length 20s segments with 5s overlap
+4. CLI skeleton (`cli.py`): `segment`, `ingest`, `search` commands
+
+### Phase 2 — Ingestion Pipeline (needs OpenRouter key)
+5. GeminiVideoAnalyzer (`video_analyzer.py`): scene + transcript + prosody in one call
+6. OpenAI embedder (`embedding.py`)
+7. Supabase client (`sql_store.py`): schema creation, insert, FTS queries
+8. Pinecone client (`vector_store.py`): upsert, similarity search
+9. Ingestion orchestrator (`ingestion.py`): segment → analyze → embed → store
+
+### Phase 3 — Search (needs all keys)
+10. Retriever (`retriever.py`): parallel FTS + vector search, RRF fusion
+11. Reranker (`reranker.py`): Claude Sonnet re-scoring
+12. CLI search command: query → results with evidence + video playback reference
+
+### Phase 4 — Web UI (optional)
+13. Simple web interface (Flask/Streamlit) wrapping the same `src/` modules
 
 ---
 
 ## Verification
 - Run all 6 example queries from the challenge spec
 - For transcript queries: verify matched segment contains expected words
-- For visual queries: display keyframes from matched segments
-- For audio queries: confirm prosody notes mention raised voices
-- For OCR queries: verify extracted plate text matches video
+- For visual queries: display keyframes from matched segments in notebook
+- For action queries: verify scene description captures temporal events (not just static frames)
+- For audio queries: confirm prosody data correctly flags shouting
+- For text queries: verify scene description mentions visible text/plates
+- For abstract queries: verify vector search finds semantically relevant results
 - Latency: queries should return in <3 seconds
