@@ -39,7 +39,16 @@ If no speech is audible, write "No speech detected."
 Include prominent non-speech in brackets if it is something that is notable, e.g. [explosion], [gunshot], [crash].
 
 === PROSODY ===
-Characterize the human speech in this clip. Ignore background noise — that belongs in SCENE DESCRIPTION.
+Analyze the human speech in this clip by assessing these five audio dimensions:
+1. Average volume — overall loudness of the speech
+2. Volume variation — how much the loudness changes (steady vs. dynamic)
+3. Average pitch — general tone of the voice (high vs. low)
+4. Pitch variation — how much the pitch modulates (monotone vs. expressive)
+5. Speaking rate — how quickly the person is talking
+
+Ignore background noise (sirens, engines, wind, radio) — focus only on human voices.
+Use your assessment of these dimensions to inform your classification below.
+
 Return ONLY a single JSON object — no markdown fences, no text before or after.
 
 {
@@ -84,8 +93,15 @@ Include prominent non-speech in brackets if it is something that is notable, e.g
 """
 
 PROSODY_ONLY_PROMPT = """\
-Characterize the volume and emotional tone of human speech in this body-worn camera footage. \
-Ignore background noise (sirens, engines, wind, radio) — focus only on voices.
+Analyze the human speech in this body-worn camera footage by assessing these five audio dimensions:
+1. Average volume — overall loudness of the speech
+2. Volume variation — how much the loudness changes (steady vs. dynamic)
+3. Average pitch — general tone of the voice (high vs. low)
+4. Pitch variation — how much the pitch modulates (monotone vs. expressive)
+5. Speaking rate — how quickly the person is talking
+
+Ignore background noise (sirens, engines, wind, radio) — focus only on human voices.
+Use your assessment of these dimensions to inform your classification below.
 
 Return ONLY a single JSON object — no markdown fences, no text before or after.
 

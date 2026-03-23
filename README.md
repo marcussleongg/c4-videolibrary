@@ -1,9 +1,20 @@
 # Video Library Search System
 
+TODOS:
+- run the tests in notebook (probably still just use gemini for all)
+- actually ingest the segments
+- pray it works
+- consider building ui, that allows for ingestion of new videos
+
 ## Core Considerations
 
-### Configuration vs Secrets
-API keys and connection strings belong in `.env`. Everything else — model IDs, segmentation parameters, retrieval tuning — lives as plain values in `config.py`. `.env` is for secrets, `config.py` is for configuration.
+### Frame Sampling VS native video processing
+Ideally I would have been able to test/use models that have true native video processing (not frames), through 3D convolution, tokenizers that capture temporal information, etc. but they don't exist in production LLMs yet.
+
+That leaves me with models that use frame sampling (model reasons to reconstruct temporal understanding). Many academic papers on video understanding benchmarks explicitly perform frame sampling, but I did not find work on native video processing (VLMs frame sample themselves). The papers were also older (before models that could natively take in videos were released) and hence did not benchmark models that are available today like Gemini 2.5/3. As such, these benchmarks served as a guideline to the best-performing models, but when considering the scope of this takehome, I decided to take the approach of using models with native video processing rather than frame sampling myself (although models like GPT-4o performed very well in benchmarks, but abstracting from performance of Gemini 1.5, Gemini 2.5/3 should perform as well if not better).
+
+### Chunking by fixed window length with overlap
+This is a standard approach as seen in RAG. It is slightly different since text has natural breakpoints (sentences, paragraphs) but we are kind of flying blind for video. I decided on 20 seconds as segment length with 5 seconds overlap to fit length of actions that can occur during incidents (purely educated guess) like a foot chase, a takedown, pit manuever with crash, taser deployment and handcuff, etc. 5 second overlap is 25% of the segment length to keep as much as possible to ensure actions are not split between segments to lose semantic representation.
 
 ### Hotswappable Providers
 Each analysis task (scene description, transcription, prosody) has its own Protocol interface. Swapping a provider means changing the class in the factory (`providers/__init__.py`), not rewiring the pipeline. The default fast path combines all three into a single Gemini call; swapping one provider causes only that task to use a separate call.
