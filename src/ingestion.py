@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import re
 import time
+import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from pathlib import Path
 
 import httpx
+from google.genai import errors as genai_errors
 
 from src.config import SEGMENTS_DIR
 from src.providers import analyze_segment, get_embedding_provider
@@ -22,6 +24,8 @@ _RETRYABLE = (
     httpx.HTTPStatusError,
     httpx.TimeoutException,
     httpx.ConnectError,
+    genai_errors.ClientError,   # 429 rate limits, 400 transient
+    genai_errors.ServerError,   # 500/502/503/504
     ConnectionError,
     TimeoutError,
 )
@@ -138,6 +142,7 @@ def ingest_segment(seg_meta: dict, force: bool = False) -> str | None:
             if _is_retryable(e) and attempt < MAX_RETRIES - 1:
                 wait = RETRY_BACKOFF * (2 ** attempt)
                 print(f"  [RETRY] {seg_id} attempt {attempt + 1}/{MAX_RETRIES}: {e} (waiting {wait}s)")
+                traceback.print_exc()
                 time.sleep(wait)
             else:
                 raise
@@ -207,7 +212,10 @@ def ingest_all_videos(max_workers: int = 4, force: bool = False) -> list[str]:
     )
 
     for video_dir in video_dirs:
-        seg_files = sorted(video_dir.glob("*_seg_*.mp4"))
+        seg_files = sorted(
+            f for f in video_dir.glob("*_seg_*.mp4")
+            if not f.name.startswith("._")  # skip macOS resource forks
+        )
         if not seg_files:
             continue
 

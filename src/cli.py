@@ -50,7 +50,10 @@ def cmd_ingest(args):
             seg_dir = Path(SEGMENTS_DIR) / video_path.stem
             import re
             segment_metas = []
-            for seg_file in sorted(seg_dir.glob("*_seg_*.mp4")):
+            for seg_file in sorted(
+                f for f in seg_dir.glob("*_seg_*.mp4")
+                if not f.name.startswith("._")  # skip macOS resource forks
+            ):
                 match = re.search(r"_seg_(\d+)", seg_file.stem)
                 if not match:
                     continue

@@ -1,14 +1,14 @@
-"""LLM reranker — Claude Sonnet re-scores retrieval candidates for relevance."""
+"""LLM reranker — Gemini re-scores retrieval candidates for relevance."""
 from __future__ import annotations
 
 import json
 import re
 
-from openai import OpenAI
+from google import genai
+from google.genai import types
 
 from src.config import (
-    OPENROUTER_API_KEY,
-    OPENROUTER_BASE_URL,
+    GEMINI_API_KEY,
     RERANKER_MODEL,
     TOP_K_RERANK,
 )
@@ -81,7 +81,7 @@ def rerank(
     *,
     top_k: int = TOP_K_RERANK,
 ) -> list[dict]:
-    """Re-score candidates using Claude Sonnet.
+    """Re-score candidates using Gemini.
 
     Takes the top candidates from RRF fusion and asks the LLM to judge
     relevance based on the actual scene descriptions and transcripts.
@@ -104,16 +104,13 @@ def rerank(
         candidates=formatted,
     )
 
-    client = OpenAI(
-        base_url=OPENROUTER_BASE_URL,
-        api_key=OPENROUTER_API_KEY,
-    )
+    client = genai.Client(api_key=GEMINI_API_KEY)
 
-    response = client.chat.completions.create(
+    response = client.models.generate_content(
         model=RERANKER_MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=2048,
+        contents=prompt,
+        config=types.GenerateContentConfig(max_output_tokens=2048),
     )
 
-    raw = response.choices[0].message.content
+    raw = response.text
     return _parse_rerank_response(raw, to_rerank)

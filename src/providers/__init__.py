@@ -18,13 +18,13 @@ from src.providers.base import (
     TranscriptResult,
     TranscriptionProvider,
 )
-from src.providers.embedding import OpenAIEmbedder
+from src.providers.embedding import GeminiEmbedder
 from src.providers.video_analyzer import GeminiVideoAnalyzer
 
 
 def get_embedding_provider() -> EmbeddingProvider:
     """Return the configured EmbeddingProvider."""
-    return OpenAIEmbedder()
+    return GeminiEmbedder()
 
 
 def get_scene_describer() -> SceneDescriber:

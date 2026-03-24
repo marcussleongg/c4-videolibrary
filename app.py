@@ -140,14 +140,14 @@ def ingest(video_file: str | None, youtube_url: str) -> str:
 def search(query: str):
     """Run retrieval + reranking and return results for the table."""
     if not query.strip():
-        return [], gr.update()
+        return []
 
     from src.retriever import retrieve
     from src.reranker import rerank
 
     candidates = retrieve(query)
     if not candidates:
-        return [], gr.update(value="<p>No results found.</p>")
+        return []
 
     results = rerank(query, candidates)
 
@@ -165,7 +165,7 @@ def search(query: str):
             start,  # hidden: raw start_s for playback
         ])
 
-    return table_rows, gr.update(value="")
+    return table_rows
 
 
 # ---------------------------------------------------------------------------
@@ -174,23 +174,21 @@ def search(query: str):
 
 def play_segment(table_data, evt: gr.SelectData):
     """When a result row is clicked, load the video at the right timestamp."""
-    if not table_data or evt.index[0] >= len(table_data):
-        return gr.update()
+    import pandas as pd
+    if table_data is None or (isinstance(table_data, pd.DataFrame) and table_data.empty):
+        return gr.update(), ""
+    if evt.index[0] >= len(table_data):
+        return gr.update(), ""
 
-    row = table_data[evt.index[0]]
-    file_name = row[2]
-    start_s = float(row[5])
+    row = table_data.iloc[evt.index[0]]
+    file_name = row.iloc[2]
+    start_s = float(row.iloc[5])
 
     video_path = _resolve_video_path(file_name)
     if not video_path:
-        return f"<p style='color:#ef4444'>Video not found locally: {file_name}</p>"
+        return None, f"Video not found locally: {file_name}"
 
-    return (
-        f'<video src="/file={video_path}" controls autoplay width="100%" '
-        f'style="max-height:70vh; border-radius:8px;"></video>'
-        f'<script>document.querySelector("#player video")'
-        f".currentTime={start_s};</script>"
-    )
+    return video_path, f"Starts at {_fmt_timestamp(start_s)} — seek to this timestamp in the player."
 
 
 # ---------------------------------------------------------------------------
@@ -234,24 +232,25 @@ with gr.Blocks(title="Video Library") as app:
             interactive=False,
             label="Results",
         )
-        player_html = gr.HTML(elem_id="player")
+        player_video = gr.Video(label="Playback", interactive=False)
+        player_info = gr.Markdown()
 
         search_btn.click(
             fn=search,
             inputs=[query_input],
-            outputs=[results_table, player_html],
+            outputs=[results_table],
         )
         # Submit on Enter
         query_input.submit(
             fn=search,
             inputs=[query_input],
-            outputs=[results_table, player_html],
+            outputs=[results_table],
         )
 
         results_table.select(
             fn=play_segment,
             inputs=[results_table],
-            outputs=player_html,
+            outputs=[player_video, player_info],
         )
 
 
@@ -260,5 +259,4 @@ if __name__ == "__main__":
     app.launch(
         allowed_paths=[VIDEO_DIR],
         theme=gr.themes.Soft(),
-        css="#player video { background: #000; }",
     )

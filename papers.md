@@ -8,9 +8,6 @@ VHELM: A Holistic Evaluation of Vision Language Models
 https://arxiv.org/pdf/2410.07112
 GPT-4o is best across all the metrics, but when we isolate to visual perception, knowledge (VQA) and reasoning (VQA) metrics, models like Gemini 1.5 Flash are somewhat comparable and do better in some metrics. Similarly Flash models are very comparable/do better than Pro models in some of these metrics. If we abstract to newer Gemini models, it can mean Flash is a worthy model to use when considering cost-performance trade-off. Note that this is an image benchmark.
 
-Multi-hop, not relevant to project but can state as an improvement
-https://arxiv.org/html/2603.14468v1
-
 MLVU: Benchmarking Multi-task Long Video Understanding
 https://arxiv.org/pdf/2406.04264
 GPT-4o performed best out of all models tested (also not alot of newer models/ones we have access to. MLLMs perform much worse with longer videos, justification for chunking down to shorter clips.)
@@ -22,6 +19,9 @@ Similarly GPT-4o performs best, Gemini 1.5 Flash very comparable to Gemini 1.5 P
 Video-MME: The First-Ever Comprehensive Evaluation Benchmark of Multi-modal LLMs in Video Analysis
 https://arxiv.org/pdf/2405.21075
 Similar to VHELM, that Gemini 1.5 Flash is comparable to Pro and GPT-4o. Also frame extraction.
+
+Multi-hop, not used in this project but could have been added as an improvement
+https://arxiv.org/html/2603.14468v1
 
 **Speech-to-text:**
 https://artificialanalysis.ai/speech-to-text

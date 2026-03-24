@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-import base64
 import json
 import re
 import subprocess
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
-from openai import OpenAI
+from google import genai
+from google.genai import types
 
-from src.config import OPENROUTER_API_KEY, OPENROUTER_BASE_URL, SCENE_MODEL
+from src.config import GEMINI_API_KEY, SCENE_MODEL
 from src.providers.base import (
     ProsodyResult,
     SceneDescription,
@@ -55,19 +55,19 @@ def _compress_to_720p(video_bytes: bytes, suffix: str = ".mp4") -> bytes:
         Path(tmp_in_path).unlink(missing_ok=True)
 
 
-def _build_video_message(video_bytes: bytes, prompt: str) -> list[dict]:
-    """Build OpenRouter message with base64-encoded video."""
-    video_b64 = base64.b64encode(video_bytes).decode("utf-8")
-    return [{
-        "role": "user",
-        "content": [
-            {
-                "type": "video_url",
-                "video_url": {"url": f"data:video/mp4;base64,{video_b64}"},
-            },
-            {"type": "text", "text": prompt},
-        ],
-    }]
+def _build_video_content(video_bytes: bytes, prompt: str) -> types.Content:
+    """Build Gemini content with inline video bytes at medium resolution (70 tokens/frame)."""
+    return types.Content(
+        parts=[
+            types.Part(
+                inline_data=types.Blob(data=video_bytes, mime_type="video/mp4"),
+                media_resolution=types.PartMediaResolution(
+                    level=types.PartMediaResolutionLevel.MEDIA_RESOLUTION_MEDIUM,
+                ),
+            ),
+            types.Part(text=prompt),
+        ]
+    )
 
 
 # --- Response parsing ---
@@ -221,44 +221,49 @@ class GeminiVideoAnalyzer:
     (e.g., when the other tasks are handled by swapped-in providers).
     """
 
-    def __init__(self, model: str | None = None):
+    def __init__(self, model: str | None = None, compress: bool = False):
         self._model = model or SCENE_MODEL
-        self._client = OpenAI(
-            base_url=OPENROUTER_BASE_URL,
-            api_key=OPENROUTER_API_KEY,
+        self._compress = compress
+        # v1alpha required for media_resolution parameter
+        self._client = genai.Client(
+            api_key=GEMINI_API_KEY,
+            http_options={"api_version": "v1alpha"},
         )
 
-    def _call(self, messages: list[dict], max_tokens: int = 4096) -> str:
-        response = self._client.chat.completions.create(
+    def _call(self, content: types.Content, max_tokens: int = 8192) -> str:
+        response = self._client.models.generate_content(
             model=self._model,
-            messages=messages,
-            max_tokens=max_tokens,
+            contents=content,
+            config=types.GenerateContentConfig(max_output_tokens=max_tokens),
         )
-        return response.choices[0].message.content
+        # warning in the event that the response is truncated
+        if response.candidates and response.candidates[0].finish_reason.name == "MAX_TOKENS":
+            print(f"  [WARN] Response truncated at {max_tokens} tokens — output may be incomplete")
+        return response.text
+
+    def _prepare(self, video_bytes: bytes) -> bytes:
+        """Optionally compress video before sending to the API."""
+        return _compress_to_720p(video_bytes) if self._compress else video_bytes
 
     def analyze(self, video_bytes: bytes) -> tuple[SceneDescription, TranscriptResult, ProsodyResult]:
         """Combined call — scene + transcript + prosody in one API call."""
-        compressed = _compress_to_720p(video_bytes)
-        messages = _build_video_message(compressed, COMBINED_PROMPT)
-        raw = self._call(messages)
+        content = _build_video_content(self._prepare(video_bytes), COMBINED_PROMPT)
+        raw = self._call(content)
         return _parse_combined_response(raw)
 
     # --- Individual Protocol methods (used if other providers are swapped in) ---
 
     def describe(self, video_bytes: bytes) -> SceneDescription:
-        compressed = _compress_to_720p(video_bytes)
-        messages = _build_video_message(compressed, SCENE_ONLY_PROMPT)
-        raw = self._call(messages)
+        content = _build_video_content(self._prepare(video_bytes), SCENE_ONLY_PROMPT)
+        raw = self._call(content)
         return _parse_scene_only(raw)
 
     def transcribe(self, video_bytes: bytes) -> TranscriptResult:
-        compressed = _compress_to_720p(video_bytes)
-        messages = _build_video_message(compressed, TRANSCRIPT_ONLY_PROMPT)
-        raw = self._call(messages)
+        content = _build_video_content(self._prepare(video_bytes), TRANSCRIPT_ONLY_PROMPT)
+        raw = self._call(content)
         return TranscriptResult(transcript=raw.strip())
 
     def analyze_prosody(self, video_bytes: bytes) -> ProsodyResult:
-        compressed = _compress_to_720p(video_bytes)
-        messages = _build_video_message(compressed, PROSODY_ONLY_PROMPT)
-        raw = self._call(messages)
+        content = _build_video_content(self._prepare(video_bytes), PROSODY_ONLY_PROMPT)
+        raw = self._call(content)
         return _parse_prosody_json(raw)

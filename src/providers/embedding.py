@@ -1,31 +1,35 @@
-"""OpenAI embedding provider via OpenRouter."""
+"""Embedding provider via Gemini API."""
 from __future__ import annotations
 
-from openai import OpenAI
+from google import genai
+from google.genai import types
 
-from src.config import OPENROUTER_API_KEY, OPENROUTER_BASE_URL, EMBEDDING_MODEL
+from src.config import GEMINI_API_KEY, EMBEDDING_MODEL, EMBEDDING_DIMENSION
 
 
-class OpenAIEmbedder:
-    """Implements EmbeddingProvider using OpenAI text-embedding models via OpenRouter."""
+class GeminiEmbedder:
+    """Implements EmbeddingProvider using Gemini embedding models."""
 
     def __init__(self, model: str | None = None):
         self._model = model or EMBEDDING_MODEL
-        self._client = OpenAI(
-            base_url=OPENROUTER_BASE_URL,
-            api_key=OPENROUTER_API_KEY,
-        )
+        self._client = genai.Client(api_key=GEMINI_API_KEY)
 
     def embed(self, text: str) -> list[float]:
-        resp = self._client.embeddings.create(
+        result = self._client.models.embed_content(
             model=self._model,
-            input=text,
+            contents=text,
+            config=types.EmbedContentConfig(
+                output_dimensionality=EMBEDDING_DIMENSION,
+            ),
         )
-        return resp.data[0].embedding
+        return result.embeddings[0].values
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        resp = self._client.embeddings.create(
+        result = self._client.models.embed_content(
             model=self._model,
-            input=texts,
+            contents=texts,
+            config=types.EmbedContentConfig(
+                output_dimensionality=EMBEDDING_DIMENSION,
+            ),
         )
-        return [item.embedding for item in resp.data]
+        return [e.values for e in result.embeddings]
